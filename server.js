@@ -1,4 +1,5 @@
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -31,9 +32,9 @@ const seedState = {
     { name: "Elite", duration: "12 Months", price: 7999, label: "Priority trainer support" }
   ],
   members: [
-    { id: "M001", name: "Arun Kumar", email: "member@aigym.com", trainerId: "T001", plan: "Premium", status: "Active", attendance: 21, progress: 82 },
-    { id: "M002", name: "Priya Shah", email: "priya@aigym.com", trainerId: "T002", plan: "Basic", status: "Active", attendance: 14, progress: 64 },
-    { id: "M003", name: "Daniel Roy", email: "daniel@aigym.com", trainerId: "T001", plan: "Basic", status: "Trial", attendance: 6, progress: 35 }
+    { id: "M001", name: "Arun Kumar", email: "member@aigym.com", phone: "+91 98765 43210", birthDate: "1998-07-20", trainerId: "T001", plan: "Premium", status: "Active", attendance: 21, progress: 82 },
+    { id: "M002", name: "Priya Shah", email: "priya@aigym.com", phone: "+91 98765 43211", birthDate: "2001-08-12", trainerId: "T002", plan: "Basic", status: "Active", attendance: 14, progress: 64 },
+    { id: "M003", name: "Daniel Roy", email: "daniel@aigym.com", phone: "+91 98765 43212", birthDate: "1995-12-04", trainerId: "T001", plan: "Basic", status: "Trial", attendance: 6, progress: 35 }
   ],
   trainers: [
     { id: "T001", name: "David Johnson", specialty: "Strength", sessions: 7, score: 96 },
@@ -67,7 +68,8 @@ const seedState = {
     ["Workout assignments ready", "AI"]
   ],
   aiMessages: {},
-  attendanceLog: []
+  attendanceLog: [],
+  whatsappMessages: []
 };
 
 const seedUsers = [
@@ -113,6 +115,14 @@ function readDatabase() {
   }
   if (!Array.isArray(db.platformInvoices)) { db.platformInvoices = []; changed = true; }
   if (!Array.isArray(db.platformLeads)) { db.platformLeads = []; changed = true; }
+  (db.tenants || []).forEach((tenant) => {
+    const state = tenant.state || {};
+    if (!Array.isArray(state.whatsappMessages)) { state.whatsappMessages = []; changed = true; }
+    (state.members || []).forEach((member) => {
+      if (member.phone === undefined) { member.phone = member.emergencyContact || ""; changed = true; }
+      if (member.birthDate === undefined) { member.birthDate = ""; changed = true; }
+    });
+  });
   if (autoCloseAttendance(db)) changed = true;
   if (changed) writeDatabase(db);
   return db;
@@ -226,6 +236,178 @@ function autoCloseLog(log, now, currentDate) {
 function autoCloseAttendance(db) {
   const now = new Date(); const currentDate = todayKey(); let changed = false;
   (db.tenants || []).forEach((tenant) => { const state = tenant.state || {}; if (autoCloseLog(state.attendanceLog, now, currentDate)) changed = true; if (autoCloseLog(state.trainerAttendanceLog, now, currentDate)) changed = true; });
+  return changed;
+}
+
+function ensureWhatsappState(state) {
+  if (!Array.isArray(state.whatsappMessages)) state.whatsappMessages = [];
+  return state.whatsappMessages;
+}
+
+function normalizePhone(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.length === 10) return `91${digits}`;
+  return digits;
+}
+
+function whatsappMode() {
+  return String(process.env.WHATSAPP_MODE || "mock").toLowerCase();
+}
+
+function whatsappConfigured() {
+  return Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID);
+}
+
+function whatsappTemplateFor(type) {
+  const templates = {
+    training_feedback: process.env.WHATSAPP_TRAINING_TEMPLATE,
+    birthday: process.env.WHATSAPP_BIRTHDAY_TEMPLATE,
+    payment_due: process.env.WHATSAPP_PAYMENT_DUE_TEMPLATE
+  };
+  return templates[type] || "";
+}
+
+function whatsappTextFor(type, member, details = {}) {
+  const gymName = details.gymName || "your gym";
+  if (type === "birthday") return `Happy birthday ${member.name}! Wishing you a strong, healthy year ahead from ${gymName}.`;
+  if (type === "payment_due") return `Hi ${member.name}, your payment${details.invoice ? ` for ${details.invoice}` : ""} is due${details.dueDate ? ` on ${details.dueDate}` : ""}. Please complete it to keep your membership active.`;
+  return `Hi ${member.name}, how was your training today at ${gymName}? Reply with your feedback so your coach can support you better.`;
+}
+
+function postJson(hostname, pathName, token, payload) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const request = https.request({
+      hostname,
+      path: pathName,
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body)
+      }
+    }, (response) => {
+      let data = "";
+      response.on("data", (chunk) => { data += chunk; });
+      response.on("end", () => {
+        const parsed = (() => { try { return data ? JSON.parse(data) : {}; } catch { return { raw: data }; } })();
+        if (response.statusCode >= 200 && response.statusCode < 300) resolve(parsed);
+        else reject(new Error(parsed.error?.message || parsed.message || `WhatsApp API returned ${response.statusCode}`));
+      });
+    });
+    request.on("error", reject);
+    request.write(body);
+    request.end();
+  });
+}
+
+async function sendWhatsappMessage(state, tenant, member, type, details = {}) {
+  const log = ensureWhatsappState(state);
+  const idempotencyKey = details.key || `${type}:${member.id}:${todayKey()}`;
+  if (log.some((item) => item.key === idempotencyKey)) return false;
+
+  const phone = normalizePhone(member.phone || member.mobile || member.emergencyContact);
+  const message = whatsappTextFor(type, member, { ...details, gymName: tenant.name });
+  const entry = {
+    id: `WA${String(log.length + 1).padStart(5, "0")}`,
+    key: idempotencyKey,
+    type,
+    memberId: member.id,
+    memberName: member.name,
+    phone,
+    message,
+    status: "mock",
+    createdAt: new Date().toISOString()
+  };
+
+  if (!phone) {
+    entry.status = "skipped";
+    entry.error = "Member phone number is missing.";
+    log.unshift(entry);
+    return true;
+  }
+
+  const live = whatsappMode() === "live" && whatsappConfigured();
+  if (!live) {
+    entry.status = "mock";
+    entry.error = "Mock mode: add Meta WhatsApp credentials on Render to send live messages.";
+    log.unshift(entry);
+    return true;
+  }
+
+  const template = whatsappTemplateFor(type);
+  const payload = template ? {
+    messaging_product: "whatsapp",
+    to: phone,
+    type: "template",
+    template: {
+      name: template,
+      language: { code: process.env.WHATSAPP_TEMPLATE_LANGUAGE || "en" },
+      components: [{ type: "body", parameters: [{ type: "text", text: member.name }, { type: "text", text: tenant.name }] }]
+    }
+  } : {
+    messaging_product: "whatsapp",
+    to: phone,
+    type: "text",
+    text: { preview_url: false, body: message }
+  };
+
+  try {
+    const version = process.env.WHATSAPP_API_VERSION || "v20.0";
+    const result = await postJson("graph.facebook.com", `/${version}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`, process.env.WHATSAPP_ACCESS_TOKEN, payload);
+    entry.status = "sent";
+    entry.providerId = result.messages?.[0]?.id || "";
+  } catch (error) {
+    entry.status = "failed";
+    entry.error = error.message;
+  }
+  log.unshift(entry);
+  return true;
+}
+
+function daysUntil(dateText) {
+  if (!dateText) return null;
+  const today = new Date(`${todayKey()}T00:00:00+05:30`);
+  const target = new Date(`${String(dateText).slice(0, 10)}T00:00:00+05:30`);
+  if (Number.isNaN(target.getTime())) return null;
+  return Math.round((target - today) / 86400000);
+}
+
+async function runWhatsappAutomations(db) {
+  let changed = false;
+  const currentDate = todayKey();
+  for (const tenant of db.tenants || []) {
+    const state = tenant.state || {};
+    ensureWhatsappState(state);
+    for (const member of state.members || []) {
+      const birthDate = String(member.birthDate || member.birthday || "").slice(5, 10);
+      if (birthDate && birthDate === currentDate.slice(5, 10)) {
+        changed = await sendWhatsappMessage(state, tenant, member, "birthday", { key: `birthday:${member.id}:${currentDate}` }) || changed;
+      }
+
+      const records = (state.attendanceLog || []).filter((record) => record.memberId === member.id && record.date === currentDate && record.checkOutTime);
+      for (const record of records) {
+        changed = await sendWhatsappMessage(state, tenant, member, "training_feedback", { key: `training:${member.id}:${record.id || record.date}` }) || changed;
+      }
+
+      const dueInvoices = (state.invoices || []).filter((invoice) => invoice.recipientType === "member" && invoice.recipientId === member.id && invoice.paymentStatus !== "Paid" && invoice.status === "Issued");
+      for (const invoice of dueInvoices) {
+        const remaining = daysUntil(invoice.dueDate);
+        if (remaining !== null && remaining >= 0 && remaining <= 3) {
+          changed = await sendWhatsappMessage(state, tenant, member, "payment_due", { key: `invoice-due:${invoice.id}:${member.id}`, invoice: invoice.number, dueDate: invoice.dueDate }) || changed;
+        }
+      }
+
+      const payment = (state.payments || []).find((item) => item.memberId === member.id && item.status !== "Paid");
+      const membershipDays = daysUntil(member.membershipEnd);
+      if (payment && membershipDays !== null && membershipDays >= 0 && membershipDays <= 3) {
+        changed = await sendWhatsappMessage(state, tenant, member, "payment_due", { key: `membership-due:${member.id}:${member.membershipEnd}`, invoice: payment.invoice, dueDate: member.membershipEnd }) || changed;
+      }
+    }
+    state.whatsappMessages = state.whatsappMessages.slice(0, 200);
+  }
+  if (changed) writeDatabase(db);
   return changed;
 }
 
@@ -765,6 +947,7 @@ async function handleApi(request, response, pathname) {
     }
 
     record.checkOutTime = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+    await sendWhatsappMessage(attendanceState, attendanceTenant, member, "training_feedback", { key: `training:${member.id}:${record.id || record.date}` });
     attendanceState.activity.unshift([`${member.name} checked out`, "Check-out"]);
     attendanceState.activity = attendanceState.activity.slice(0, 8);
     writeDatabase(db);
@@ -783,6 +966,22 @@ async function handleApi(request, response, pathname) {
     return sendJson(response, 200, tenant.state);
   }
 
+  if (request.method === "GET" && pathname === "/api/admin/whatsapp") {
+    const session = requireSession(request, response, db, ["admin"]); if (!session) return;
+    const tenant = tenantFor(session, db); if (!tenant) return sendJson(response, 404, { message: "Gym workspace not found." });
+    const messages = ensureWhatsappState(tenant.state).slice(0, 50);
+    return sendJson(response, 200, { mode: whatsappMode(), liveConfigured: whatsappConfigured(), messages });
+  }
+
+  if (request.method === "POST" && pathname === "/api/admin/whatsapp/run") {
+    const session = requireSession(request, response, db, ["admin"]); if (!session) return;
+    const tenant = tenantFor(session, db); if (!tenant) return sendJson(response, 404, { message: "Gym workspace not found." });
+    const before = ensureWhatsappState(tenant.state).length;
+    await runWhatsappAutomations(db);
+    const messages = ensureWhatsappState(tenant.state).slice(0, 50);
+    return sendJson(response, 200, { ok: true, created: Math.max(0, messages.length - before), mode: whatsappMode(), liveConfigured: whatsappConfigured(), messages, state: tenant.state });
+  }
+
   if (request.method === "POST" && pathname === "/api/admin/members") {
     const session = requireSession(request, response, db, ["admin"]); if (!session) return;
     const tenant = tenantFor(session, db); if (!tenant) return sendJson(response, 404, { message: "Gym workspace not found." });
@@ -790,15 +989,17 @@ async function handleApi(request, response, pathname) {
     const name = String(body.name || "").trim();
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
+    const phone = String(body.phone || "").trim();
+    const birthDate = String(body.birthDate || "").trim();
     const state = tenant.state;
-    if (!name || !email || password.length < 8) return sendJson(response, 400, { message: "Name, email, and a password of at least 8 characters are required." });
+    if (!name || !email || !phone || password.length < 8) return sendJson(response, 400, { message: "Name, email, phone number, and a password of at least 8 characters are required." });
     if (db.users.some((user) => user.email === email) || state.members.some((member) => String(member.email).toLowerCase() === email)) {
       return sendJson(response, 409, { message: "That email is already registered." });
     }
     const trainerId = state.trainers.some((trainer) => trainer.id === body.trainerId) ? body.trainerId : (state.trainers[0]?.id || "");
     const plan = state.plans.find((item) => item.name === body.plan) || state.plans[0] || { name: "Basic", price: 0 };
     const memberId = nextId(state.members, "M");
-    const member = { id: memberId, name, email, trainerId, plan: plan.name, status: "Active", attendance: 0, progress: 0, membershipStart: new Date().toISOString().slice(0, 10), goal: "Build consistency" };
+    const member = { id: memberId, name, email, phone, birthDate, trainerId, plan: plan.name, status: "Active", attendance: 0, progress: 0, membershipStart: new Date().toISOString().slice(0, 10), goal: "Build consistency" };
     state.members.push(member);
     state.subscriptions.push({ memberId, plan: plan.name, amount: Number(plan.price || 0), status: "Active" });
     state.payments.push({ memberId, amount: Number(plan.price || 0), status: "Pending", invoice: `INV-${1001 + state.payments.length}` });
@@ -873,3 +1074,6 @@ server.listen(port, "0.0.0.0", () => {
 
 // Keep automatic attendance closures running even when no dashboard is open.
 setInterval(() => { try { readDatabase(); } catch (error) { console.error("Automatic checkout failed:", error.message); } }, 60_000).unref();
+setInterval(() => {
+  runWhatsappAutomations(readDatabase()).catch((error) => console.error("WhatsApp automation failed:", error.message));
+}, 15 * 60_000).unref();

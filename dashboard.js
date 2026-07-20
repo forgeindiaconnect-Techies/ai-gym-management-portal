@@ -86,6 +86,7 @@ function loadState() {
   state.workoutTemplates = Array.isArray(state.workoutTemplates) ? state.workoutTemplates : clone(defaultState.workoutTemplates);
   state.payments = Array.isArray(state.payments) ? state.payments : clone(defaultState.payments);
   state.invoices = Array.isArray(state.invoices) ? state.invoices : [];
+  state.whatsappMessages = Array.isArray(state.whatsappMessages) ? state.whatsappMessages : [];
   state.attendanceLog = Array.isArray(state.attendanceLog) ? state.attendanceLog : [];
   state.trainerAttendanceLog = Array.isArray(state.trainerAttendanceLog) ? state.trainerAttendanceLog : [];
   defaultPlans.forEach((item) => {
@@ -670,6 +671,8 @@ function renderAdminMemberForm(state) {
       <form class="dashboard-form" data-action="addMember">
         <label>Member name<input name="name" placeholder="Example: Kavin R." required></label>
         <label>Email<input name="email" type="email" placeholder="kavin@aigym.com" required></label>
+        <label>Registered WhatsApp number<input name="phone" type="tel" placeholder="+91 98765 43210" required></label>
+        <label>Birthday<input name="birthDate" type="date"></label>
         <label>Login password<input name="password" type="password" minlength="8" autocomplete="new-password" placeholder="Minimum 8 characters" required></label>
         <label>Confirm password<input name="confirmPassword" type="password" minlength="8" autocomplete="new-password" placeholder="Enter the password again" required></label>
         <label>Assign trainer<select name="trainerId">${renderTrainerOptions(state)}</select></label>
@@ -678,6 +681,29 @@ function renderAdminMemberForm(state) {
       </form>
       <ul class="task-list compact-admin-list admin-manage-list">${rows || "<li>No members yet</li>"}</ul>
     </details>
+  `;
+}
+
+function renderWhatsappAutomationPanel(state) {
+  const messages = (state.whatsappMessages || []).slice(0, 8);
+  const rows = messages.map((item) => `
+    <li>
+      <span><strong>${escapeAttribute(item.memberName || "Member")}</strong><small>${escapeAttribute(item.type || "message")} Â· ${escapeAttribute(item.phone || "No phone")} Â· ${escapeAttribute(new Date(item.createdAt || Date.now()).toLocaleString("en-IN"))}</small></span>
+      <span class="pill">${escapeAttribute(item.status || "mock")}</span>
+    </li>
+  `).join("");
+  return `
+    <article class="card admin-insight-card whatsapp-automation-card">
+      <div class="admin-card-heading">
+        <div><h2>WhatsApp Automation</h2><p>Birthday wishes, payment due reminders, and training feedback messages.</p></div>
+        <button class="pill pill-button" type="button" data-action="runWhatsappAutomation">Run now</button>
+      </div>
+      <ul class="task-list compact-admin-list">
+        <li><span>Mode</span><strong>Mock until Meta credentials are added</strong></li>
+        <li><span>Templates</span><strong>Birthday Â· Payment due Â· Training feedback</strong></li>
+      </ul>
+      <ul class="task-list compact-admin-list whatsapp-message-list">${rows || "<li><span>No WhatsApp messages yet</span><strong>Run automation now</strong></li>"}</ul>
+    </article>
   `;
 }
 
@@ -2477,6 +2503,11 @@ function renderDashboard() {
     adminLibraries.innerHTML = role === "admin" ? renderAdminLibrariesPanel(state) : "";
   }
 
+  const adminWhatsapp = dashboardRoot.querySelector("[data-admin-whatsapp]");
+  if (adminWhatsapp) {
+    adminWhatsapp.innerHTML = role === "admin" ? renderWhatsappAutomationPanel(state) : "";
+  }
+
   const adminAiReports = dashboardRoot.querySelector("[data-admin-ai-reports]");
   if (adminAiReports) {
     adminAiReports.innerHTML = role === "admin" ? renderAdminAiReportsPanel(state) : "";
@@ -2723,7 +2754,7 @@ function bindActions(role, state) {
           const response = await fetch(`${apiBaseUrl}/api/admin/members`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "Authorization": `Bearer ${currentUser()?.token || ""}` },
-            body: JSON.stringify({ name: data.name, email: data.email, password: data.password, trainerId: data.trainerId, plan: data.plan })
+            body: JSON.stringify({ name: data.name, email: data.email, phone: data.phone, birthDate: data.birthDate, password: data.password, trainerId: data.trainerId, plan: data.plan })
           });
           const result = await response.json().catch(() => ({}));
           if (!response.ok) {
@@ -2995,6 +3026,27 @@ function bindActions(role, state) {
         const equipment = state.equipment.find((item) => item.id === button.dataset.id);
         state.equipment = state.equipment.filter((item) => item.id !== button.dataset.id);
         addActivity(state, `Admin removed ${equipment?.name || "equipment"}`, "Equipment");
+      }
+
+      if (button.dataset.action === "runWhatsappAutomation") {
+        try {
+          const response = await fetch(`${apiBaseUrl}/api/admin/whatsapp/run`, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${currentUser()?.token || ""}` }
+          });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            window.alert(result.message || "Unable to run WhatsApp automation.");
+            return;
+          }
+          localStorage.setItem(storageKey, JSON.stringify(result.state));
+          window.alert(`WhatsApp automation checked. ${result.created || 0} new message log${result.created === 1 ? "" : "s"} created.`);
+          renderDashboard();
+        } catch (error) {
+          window.alert("Unable to reach the server. Please try again.");
+          console.error("WhatsApp automation failed", error);
+        }
+        return;
       }
 
       if (button.dataset.action === "toggleMemberStatus") {

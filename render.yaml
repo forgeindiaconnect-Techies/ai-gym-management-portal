@@ -20,3 +20,19 @@ services:
         sync: false
       - key: ATTENDANCE_SHIFT_HOURS
         value: "8"
+      - key: WHATSAPP_MODE
+        value: mock
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_API_VERSION
+        value: v20.0
+      - key: WHATSAPP_TEMPLATE_LANGUAGE
+        value: en
+      - key: WHATSAPP_TRAINING_TEMPLATE
+        sync: false
+      - key: WHATSAPP_BIRTHDAY_TEMPLATE
+        sync: false
+      - key: WHATSAPP_PAYMENT_DUE_TEMPLATE
+        sync: false
