@@ -6,7 +6,9 @@
   const button = document.createElement("button");
   button.type = "button";
   button.className = "shared-profile-button";
-  button.innerHTML = `<span>${String(current.name || current.role).split(/\s+/).map(part => part[0]).join("").slice(0,2).toUpperCase()}</span><em>Edit profile</em>`;
+  button.setAttribute("aria-label", "Edit profile");
+  button.title = "Edit profile";
+  button.innerHTML = `<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M15.7 5.3 18.7 8.3M4 20h3.6L18.9 8.7a2.1 2.1 0 0 0 0-3l-.6-.6a2.1 2.1 0 0 0-3 0L4 16.4V20Z"/></svg>`;
   host.appendChild(button);
 
   const dialog = document.createElement("dialog");
@@ -29,6 +31,6 @@
   dialog.querySelector("form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.currentTarget; const save = form.querySelector(".save"); const message = form.querySelector("[data-profile-message]"); save.disabled = true; message.textContent = "Saving…";
     const payload = Object.fromEntries(new FormData(form)); delete payload.photoFile; const image = preview.querySelector("img"); if (image?.src.startsWith("data:image/")) payload.photo = image.src;
-    try { const response = await fetch("/api/profile", { method:"POST", headers:{"Content-Type":"application/json",Authorization:`Bearer ${current.token}`}, body:JSON.stringify(payload) }); const saved = await response.json(); if (!response.ok) throw new Error(saved.message || "Unable to save profile."); current.name = saved.name; localStorage.setItem("aiGymCurrentUser", JSON.stringify(current)); button.querySelector("span").textContent = saved.name.split(/\s+/).map(part=>part[0]).join("").slice(0,2).toUpperCase(); message.textContent = "Profile updated successfully."; setTimeout(() => dialog.close(), 700); } catch(error) { message.textContent = error.message; } finally { save.disabled = false; }
+    try { const response = await fetch("/api/profile", { method:"POST", headers:{"Content-Type":"application/json",Authorization:`Bearer ${current.token}`}, body:JSON.stringify(payload) }); const saved = await response.json(); if (!response.ok) throw new Error(saved.message || "Unable to save profile."); current.name = saved.name; localStorage.setItem("aiGymCurrentUser", JSON.stringify(current)); message.textContent = "Profile updated successfully."; setTimeout(() => dialog.close(), 700); } catch(error) { message.textContent = error.message; } finally { save.disabled = false; }
   });
 })();
